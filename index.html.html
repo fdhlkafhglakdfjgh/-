@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ранняя диагностика Паркинсона</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+        }
+        canvas {
+            border: 1px solid black;
+            background-color: transparent;
+            margin-top: 10px;
+        }
+        #center-line {
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            height: 100%;
+            width: var(--line-width, 2px);
+            background-color: red;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+        }
+        button {
+            padding: 8px 16px;
+            font-size: 14px;
+            margin: 0 8px;
+            cursor: pointer;
+        }
+        #sensitivity-controls {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            margin-left: 20px;
+        }
+        label {
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        input[type=range] {
+            width: 150px;
+        }
+        #status {
+            position: absolute;
+            bottom: 10px;
+            font-size: 14px;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div id="center-line"></div>
+    <video id="video" autoplay playsinline style="display:none;"></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+    <div id="controls">
+        <button id="startButton">Включить камеру</button>
+        <button id="trackButton" style="display:none;">Начать отслеживание</button>
+        <div id="sensitivity-controls">
+            <label for="lineWidthRange">Ширина линии:</label>
+            <input id="lineWidthRange" type="range" min="2" max="20" value="2">
+
+            <label for="deviationThresholdRange">Порог отклонений:</label>
+            <input id="deviationThresholdRange" type="range" min="5" max="50" value="10">
+        </div>
+    </div>
+    <p id="status">Выровняйте лицо по красной линии, чтобы начать.</p>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const canvasElement = document.getElementById('canvas');
+        const statusElement = document.getElementById('status');
+        const startButton = document.getElementById('startButton');
+        const trackButton = document.getElementById('trackButton');
+        const lineWidthRange = document.getElementById('lineWidthRange');
+        const deviationThresholdRange = document.getElementById('deviationThresholdRange');
+        const centerLine = document.getElementById('center-line');
+        const ctx = canvasElement.getContext('2d');
+
+        let isTracking = false;
+        let deviationCount = 0;
+
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+                videoElement.srcObject = stream;
+                await new Promise((resolve) => {
+                    videoElement.onloadedmetadata = () => resolve(videoElement);
+                });
+                statusElement.textContent = "Камера включена. Выровняйте лицо по красной линии.";
+                return videoElement;
+            } catch (error) {
+                console.error("Ошибка при доступе к камере:", error);
+                statusElement.textContent = `Ошибка при доступе к камере: ${error.message}`;
+            }
+        }
+
+        function calculateAlignment(landmarks) {
+            const nose = landmarks[1];
+            const canvasCenterX = canvasElement.width / 2;
+            const noseX = nose.x * canvasElement.width;
+
+            const alignment = Math.abs(noseX - canvasCenterX);
+            return alignment;
+        }
+
+        function drawFace(landmarks) {
+            ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            ctx.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+
+            ctx.fillStyle = "blue";
+            landmarks.forEach(point => {
+                ctx.beginPath();
+                ctx.arc(point.x * canvasElement.width, point.y * canvasElement.height, 2, 0, 2 * Math.PI);
+                ctx.fill();
+            });
+        }
+
+        async function startFaceMesh() {
+            const faceMesh = new FaceMesh({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+            });
+            faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true });
+            faceMesh.onResults(onResults);
+
+            await setupCamera();
+
+            async function onResults(results) {
+                if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+                    const landmarks = results.multiFaceLandmarks[0];
+                    drawFace(landmarks);
+
+                    const alignment = calculateAlignment(landmarks);
+                    const deviationThreshold = parseInt(deviationThresholdRange.value, 10);
+
+                    if (!isTracking) {
+                        if (alignment < deviationThreshold) {
+                            statusElement.textContent = "Лицо выровнено! Нажмите 'Начать отслеживание'.";
+                            trackButton.style.display = 'inline-block';
+                        } else {
+                            statusElement.textContent = "Выровняйте лицо по красной линии, чтобы начать.";
+                            trackButton.style.display = 'none';
+                        }
+                    } else {
+                        if (alignment >= deviationThreshold) {
+                            deviationCount++;
+                        }
+                        statusElement.textContent = `Идёт отслеживание. Количество отклонений: ${deviationCount}`;
+                    }
+                } else {
+                    statusElement.textContent = "Лицо не обнаружено.";
+                }
+            }
+
+            const camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await faceMesh.send({ image: videoElement });
+                },
+                width: 640,
+                height: 480
+            });
+            camera.start();
+        }
+
+        startButton.addEventListener('click', async () => {
+            startButton.style.display = 'none';
+            try {
+                await startFaceMesh();
+            } catch (error) {
+                console.error("Ошибка при запуске FaceMesh:", error);
+                statusElement.textContent = `Ошибка при запуске FaceMesh: ${error.message}`;
+            }
+        });
+
+        trackButton.addEventListener('click', () => {
+            isTracking = true;
+            deviationCount = 0;
+            statusElement.textContent = "Отслеживание начато. Двигайте головой для теста.";
+            trackButton.style.display = 'none';
+        });
+
+        lineWidthRange.addEventListener('input', () => {
+            centerLine.style.setProperty('--line-width', `${lineWidthRange.value}px`);
+        });
+    </script>
+</body>
+</html>
